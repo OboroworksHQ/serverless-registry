@@ -32,6 +32,8 @@ import {
 import { GarbageCollectionMode, GarbageCollector } from "./garbage-collector";
 import { ManifestSchema, manifestSchema } from "../manifest";
 
+import { copyVerifiedBlob, verifiedBlobDigest } from "./blob-copy";
+
 export const ociImageIndexContentType = "application/vnd.oci.image.index.v1+json";
 
 function referrersPrefix(name: string, digest: string): string {
@@ -665,7 +667,7 @@ export class R2Registry implements Registry {
       }
 
       return {
-        digest: hexToDigest(res.checksums.sha256!),
+        digest: verifiedBlobDigest(res, digest),
         location: `/v2/${destinationLayerPath}`,
       };
     }
@@ -683,8 +685,11 @@ export class R2Registry implements Registry {
       };
     }
 
+    if (res.customMetadata && symlinkHeader in res.customMetadata) {
+      return this.layerExists(res.customMetadata[symlinkHeader], tag);
+    }
     return {
-      digest: hexToDigest(res.checksums.sha256!),
+      digest: verifiedBlobDigest(res, tag),
       size: res.size,
       exists: true,
     };
@@ -717,7 +722,7 @@ export class R2Registry implements Registry {
 
     return {
       stream: res.body!,
-      digest: hexToDigest(res.checksums.sha256!),
+      digest: verifiedBlobDigest(res, digest),
       size: res.size,
     };
   }
@@ -996,13 +1001,9 @@ export class R2Registry implements Registry {
     } else {
       const upload = this.env.REGISTRY.resumeMultipartUpload(uuid, state.uploadId);
       // TODO: Handle one last buffer here
-      await upload.complete(state.parts);
-      const obj = await this.env.REGISTRY.get(uuid);
-      const put = this.env.REGISTRY.put(`${namespace}/blobs/${expectedSha}`, obj!.body, {
-        sha256: (expectedSha as string).slice(SHA256_PREFIX_LEN),
-      });
-
-      await put;
+      // A retry may arrive after completing the temporary object but before copying it.
+      if (!(await this.env.REGISTRY.head(uuid))) await upload.complete(state.parts);
+      await copyVerifiedBlob(this.env.REGISTRY, uuid, `${namespace}/blobs/${expectedSha}`, expectedSha);
       await this.env.REGISTRY.delete(uuid);
     }
 
