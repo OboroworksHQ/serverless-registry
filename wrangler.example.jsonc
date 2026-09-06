@@ -15,6 +15,8 @@
   "env": {
     // Production
     "production": {
+      // CPU budget for streaming SHA-256 verification of multi-GiB layers.
+      "limits": { "cpu_ms": 120000 },
       "r2_buckets": [{ "binding": "REGISTRY", "bucket_name": "" }],
       "vars": {
         "JWT_REGISTRY_TOKENS_PUBLIC_KEY": "",

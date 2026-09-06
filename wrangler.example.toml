@@ -12,6 +12,8 @@ compatibility_flags = ["nodejs_compat"]
 
 ## Production
 [env.production]
+# Streaming verification of multi-GiB layers needs more than the default CPU budget.
+limits = { cpu_ms = 120000 }
 r2_buckets = [
   { binding = "REGISTRY", bucket_name = "" }
 ]
