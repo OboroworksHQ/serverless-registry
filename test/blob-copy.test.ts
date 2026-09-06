@@ -57,7 +57,7 @@ test("unverified multipart metadata fails closed", async () => {
   expect(() => verifiedBlobDigest({ ...stored, checksums: {} } as R2Object, digest)).toThrow("checksum");
 });
 
-test("failed part aborts the destination and can be retried", async () => {
+test.each(["before reading", "after reading"])("failed part %s aborts and can be retried", async (phase) => {
   const bucket = (env as Env).REGISTRY;
   await bucket.put("source", body);
   const create = bucket.createMultipartUpload.bind(bucket);
@@ -66,8 +66,7 @@ test("failed part aborts the destination and can be retried", async () => {
     const upload = await create(...args);
     const originalAbort = upload.abort.bind(upload);
     vi.spyOn(upload, "uploadPart").mockImplementationOnce(async (_part, stream) => {
-      // Model a provider failure after receiving a part, before acknowledging it.
-      await new Response(stream as ReadableStream).arrayBuffer();
+      if (phase === "after reading") await new Response(stream as ReadableStream).arrayBuffer();
       throw new Error("synthetic part failure");
     });
     vi.spyOn(upload, "abort").mockImplementation(async () => {
@@ -125,4 +124,10 @@ test("authenticated HTTP HEAD and GET read a multipart blob", async () => {
     }
     await waitOnExecutionContext(ctx);
   }
+});
+
+test("copy rejects ranges that could buffer more than 32 MiB", async () => {
+  await expect(
+    copyVerifiedBlob((env as Env).REGISTRY, "source", "target", digest, 32 * 1024 * 1024 + 1),
+  ).rejects.toThrow("Invalid blob copy parameters");
 });

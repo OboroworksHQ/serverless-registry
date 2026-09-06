@@ -1,5 +1,7 @@
-import { MAXIMUM_CHUNK, MINIMUM_CHUNK } from "../chunk";
+import { MINIMUM_CHUNK } from "../chunk";
 import { hexToDigest } from "../user";
+
+const maximumCopyPart = 32 * 1024 * 1024;
 
 const verifiedDigestMetadata = "registry-verified-sha256";
 
@@ -19,9 +21,9 @@ export async function copyVerifiedBlob(
   sourceKey: string,
   targetKey: string,
   expected: string,
-  partSize = MAXIMUM_CHUNK,
+  partSize = maximumCopyPart,
 ): Promise<void> {
-  if (!/^sha256:[a-f0-9]{64}$/.test(expected) || partSize < MINIMUM_CHUNK || partSize > MAXIMUM_CHUNK) {
+  if (!/^sha256:[a-f0-9]{64}$/.test(expected) || partSize < MINIMUM_CHUNK || partSize > maximumCopyPart) {
     throw new Error("Invalid blob copy parameters");
   }
   const source = await bucket.head(sourceKey);
@@ -41,8 +43,6 @@ export async function copyVerifiedBlob(
   const digest = new crypto.DigestStream("SHA-256");
   // Aborted digest streams reject their result promise as well as writes.
   void digest.digest.catch(() => undefined);
-  const writer = digest.getWriter();
-  void writer.closed.catch(() => undefined);
   const upload = await bucket.createMultipartUpload(targetKey, {
     customMetadata: { [verifiedDigestMetadata]: expected },
   });
@@ -52,49 +52,33 @@ export async function copyVerifiedBlob(
       const length = Math.min(partSize, source.size - offset);
       const object = await bucket.get(sourceKey, { range: { offset, length } });
       if (!object) throw new Error("Upload object disappeared");
-      // Hash in the same backpressured stream as the upload; tee() could buffer GBs.
+      // Each tee is bounded by this range (32 MiB by default), never the whole blob.
+      // Native pipeTo avoids per-chunk JavaScript promise/copy overhead on multi-GiB layers.
+      const [hashBody, uploadBody] = object.body.tee();
+      const hashing = hashBody.pipeTo(digest, { preventClose: true });
       const fixed = new FixedLengthStream(length);
-      const input = object.body.getReader();
-      const output = fixed.writable.getWriter();
-      void input.closed.catch(() => undefined);
-      void output.closed.catch(() => undefined);
-      const transfer = (async () => {
-        try {
-          while (true) {
-            const chunk = await input.read();
-            if (chunk.done) break;
-            await writer.write(chunk.value);
-            await output.write(chunk.value);
-          }
-          await output.close();
-        } catch (error) {
-          await output.abort().catch(() => undefined);
-          throw error;
-        } finally {
-          input.releaseLock();
-          output.releaseLock();
-        }
-      })();
-      void transfer.catch(() => undefined);
-      try {
-        parts.push(await upload.uploadPart(parts.length + 1, fixed.readable));
-        await transfer;
-      } catch (error) {
-        await input.cancel().catch(() => undefined);
-        await fixed.readable.cancel().catch(() => undefined);
-        await transfer.catch(() => undefined);
-        throw error;
+      const transfer = uploadBody.pipeTo(fixed.writable);
+      const uploading = upload.uploadPart(parts.length + 1, fixed.readable).catch(async (error: unknown) => {
+        // A provider may reject before taking a reader. Drain this bounded part so
+        // the source/hash pipes finish without cancelling a native R2 stream.
+        if (!fixed.readable.locked) await fixed.readable.pipeTo(new WritableStream()).catch(() => undefined);
+        return { failure: error };
+      });
+      const results = await Promise.allSettled([hashing, transfer, uploading]);
+      for (const result of results) if (result.status === "rejected") throw result.reason;
+      const uploaded = results[2];
+      if (uploaded.status === "fulfilled") {
+        if ("failure" in uploaded.value) throw uploaded.value.failure;
+        parts.push(uploaded.value);
       }
     }
-    await writer.close();
+    await digest.close();
     if (hexToDigest(await digest.digest) !== expected) throw new Error("Blob checksum mismatch");
     // The target and its verified metadata become visible only after hash validation.
     await upload.complete(parts);
   } catch (error) {
-    await writer.abort().catch(() => undefined);
+    await digest.abort().catch(() => undefined);
     await upload.abort().catch(() => undefined);
     throw error;
-  } finally {
-    writer.releaseLock();
   }
 }
