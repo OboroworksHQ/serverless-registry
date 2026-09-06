@@ -183,7 +183,8 @@ See `CONTRIBUTING.md` for contributing to the project.
 ### Finalizing layers larger than 5 GiB
 
 Chunked client uploads alone do not avoid R2's 5 GiB single-PUT limit. Large temporary upload
-objects are finalized using a second multipart upload, with bounded parts and streaming SHA-256
+objects are finalized using a second multipart upload, with native streams over at most 32 MiB
+per part and streaming SHA-256
 verification before completion. The destination is invisible until all parts and the expected
 hash have been verified. Multipart objects carry server-written verified-digest metadata because
 R2 does not populate the native whole-object SHA-256 field for them. GET, HEAD and mounted-layer
@@ -192,7 +193,10 @@ resolution accept this metadata only when it matches the requested immutable dig
 Production examples set a 120,000 ms Worker CPU limit for streaming verification of large layers.
 A 13,026,507,287-byte layer exceeded the previous 30-second CPU budget during finalization
 (error 1102; observed CPU 32.5 seconds). Keep this limit in deployment configuration; client
-chunk sizes do not reduce the total hashing work. This is a CPU ceiling, not a billing cap.
+chunk sizes do not reduce the total hashing work. Native `pipeTo` avoids JavaScript work for
+every source chunk, while a bounded per-part `tee` prevents whole-layer buffering. A rejected
+part is drained within that bound before aborting the destination, so both early and late
+provider failures can be retried. This is a CPU ceiling, not a billing cap.
 
 A failed finalization retains the temporary object for retry and aborts the destination multipart
 upload. Repeated copies reuse an already verified destination. Existing small blobs retain native
