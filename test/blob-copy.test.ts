@@ -1,7 +1,8 @@
 import { afterEach, expect, test, vi } from "vitest";
 import type { Env } from "..";
 import { env } from "cloudflare:workers";
-import { reset } from "cloudflare:test";
+import { reset, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
+import worker from "../index";
 import { copyVerifiedBlob, verifiedBlobDigest } from "../src/registry/blob-copy";
 import { MINIMUM_CHUNK } from "../src/chunk";
 import { hexToDigest } from "../src/user";
@@ -100,4 +101,28 @@ test("registry HEAD, GET and mount accept verified multipart blobs", async () =>
   await new Response(blob.stream).arrayBuffer();
   expect(await registry.mountExistingLayer("first", digest, "second")).toMatchObject({ digest });
   expect(await registry.layerExists("second", digest)).toMatchObject({ exists: true, digest, size });
+});
+
+test("authenticated HTTP HEAD and GET read a multipart blob", async () => {
+  const bindings = env as Env;
+  await bindings.REGISTRY.put("source", body);
+  await copyVerifiedBlob(bindings.REGISTRY, "source", `http/blobs/${digest}`, digest, MINIMUM_CHUNK);
+  for (const method of ["HEAD", "GET"]) {
+    const ctx = createExecutionContext();
+    const response = (await worker.fetch(
+      new Request(`https://registry.com/v2/http/blobs/${digest}`, {
+        method,
+        headers: { Authorization: `Basic ${btoa("hello:world")}` },
+      }),
+      bindings,
+      ctx,
+    )) as Response;
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Docker-Content-Digest")).toBe(digest);
+    expect(response.headers.get("Content-Length")).toBe(String(size));
+    if (method === "GET") {
+      expect(hexToDigest(await crypto.subtle.digest("SHA-256", await response.arrayBuffer()))).toBe(digest);
+    }
+    await waitOnExecutionContext(ctx);
+  }
 });
