@@ -1,7 +1,9 @@
 import { State } from "./registry/r2";
 
 export class AuthErrorResponse extends Response {
-  constructor(r: Request) {
+  // The request is no longer needed now that the realm is constant, but the
+  // signature is kept so call sites stay unchanged.
+  constructor(_r: Request) {
     const jsonBody = JSON.stringify({
       errors: [
         {
@@ -15,7 +17,10 @@ export class AuthErrorResponse extends Response {
       status: 401,
       headers: {
         "content-type": "application/json;charset=UTF-8",
-        "WWW-Authenticate": `Basic realm="${r.url}"`,
+        // Browsers cache credentials per (origin, realm). Deriving the realm from
+        // the request URL gives a different realm on every path, which makes a
+        // browser re-prompt as the UI walks the API. Keep it constant.
+        "WWW-Authenticate": `Basic realm="registry"`,
       },
     };
     super(jsonBody, init);

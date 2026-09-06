@@ -15,6 +15,9 @@ type PushCompatibilityMode = "full" | "none";
 
 export interface Env {
   REGISTRY: R2Bucket;
+  // Optional: when an assets binding is configured, whatever is not part of the
+  // registry API is served from it. Deployments without one keep returning 404.
+  ASSETS?: Fetcher;
   ENVIRONMENT: string;
   JWT_REGISTRY_TOKENS_PUBLIC_KEY?: string;
   USERNAME?: string;
@@ -33,7 +36,15 @@ const router = Router();
  */
 router.all("/v2/*", v2Router.fetch);
 
-router.all("*", () => new Response("Not Found.", { status: 404 }));
+// Anything that is not the registry API falls through to the static assets, so a
+// web UI can be served from the same origin as the API. Same origin means the
+// browser reuses the credentials it was already challenged for and no CORS is
+// involved. This runs after the credential check in fetch(), so the UI is behind
+// authentication too.
+router.all("*", (request: Request, env: Env) => {
+  if (!env.ASSETS) return new Response("Not Found.", { status: 404 });
+  return env.ASSETS.fetch(request);
+});
 
 export default {
   async fetch(request: Request, env: Env, context?: ExecutionContext) {
