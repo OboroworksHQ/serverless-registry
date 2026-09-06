@@ -179,3 +179,26 @@ The project is licensed under the [Apache License](https://opensource.org/licens
 ### Contribution
 
 See `CONTRIBUTING.md` for contributing to the project.
+
+### Finalizing layers larger than 5 GiB
+
+Chunked client uploads alone do not avoid R2's 5 GiB single-PUT limit. Large temporary upload
+objects are finalized using a second multipart upload, with bounded parts and streaming SHA-256
+verification before completion. The destination is invisible until all parts and the expected
+hash have been verified. Multipart objects carry server-written verified-digest metadata because
+R2 does not populate the native whole-object SHA-256 field for them. GET, HEAD and mounted-layer
+resolution accept this metadata only when it matches the requested immutable digest.
+
+A failed finalization retains the temporary object for retry and aborts the destination multipart
+upload. Repeated copies reuse an already verified destination. Existing small blobs retain native
+R2 checksum verification. Upload state cleanup and source removal occur after a successful copy.
+
+Tests exercise multipart boundaries with a reduced 5 MiB part size, wrong hashes, provider failure
+after receiving a part, duplicate delivery, and registry GET/HEAD/mount. These local tests are not
+a live >5 GiB upload proof; validate a real large layer on the deployed registry before claiming
+that integration gate. Client HTTP/2 peer resets are a separate transport issue.
+
+Rollback: small existing blobs are backward compatible. Once large multipart blobs have been
+published, retain the verified-metadata reader when reverting the writer; an older reader that
+requires R2's native SHA-256 field cannot read those new blobs. Do not delete stored artifacts as
+part of a code rollback.
